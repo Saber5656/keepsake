@@ -29,5 +29,5 @@ Threat model (all four selected by owner): recipients must not decrypt pre-trigg
 ## Consequences
 
 - CI must include an interop gate: a kit sealed by keepsake decrypts with the pinned `age` CLI, and vice-versa test vector (DESIGN §5.4, KU-7).
-- Project license (Apache-2.0 proposed, KU-6) must coexist with vendored MPL-2.0 files — standard file-level MPL compliance.
+- Project license (Apache-2.0, confirmed 2026-07-10) coexists with vendored MPL-2.0 files — standard file-level MPL compliance.
 - 33-byte shares → 53-char sharetext strings + 4-char checksum; QR + typed entry both supported.

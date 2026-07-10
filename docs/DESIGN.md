@@ -17,8 +17,7 @@ Canonical source of truth: this repository's `docs/` directory. GitHub Issues ar
 **デッドマンスイッチ**は GitHub Actions（無料枠・サーバ不要・本人の死後も動き続ける）上で毎日動く。本人は定期的に check-in（CLI または スマホの GitHub ボタン）する。check-in が途絶えると 段階的に：本人へ督促 → 家族へ「本人の様子を見て」安全確認メール → 猶予期間満了で **share_G を家族へメール送付**。家族は「USB の share_R + メールの share_G」を合わせて初めて復号できる。
 
 - GitHub にも、メール事業者にも、泥棒にも、**単独ではいっさい中身を読めない**
-- 暗号化は標準 **age フォーマット**。keepsake が消滅しても家族は標準ツールで復号可能（可用性）
-- 本人の金庫に**復元用パスフレーズの紙**（最後の砦。USB と同じ場所に保管しないこと）
+- 暗号化は標準 **age フォーマット**。金庫の**復元用パスフレーズの紙**（最後の砦。USB と同じ場所に保管しないこと）があれば、keepsake が消滅しても標準 age ツールだけで復号可能（可用性）。通常経路（share_R + share_G）は USB 同梱の keepsake バイナリで復号する
 - 年 1 回の**避難訓練（drill）**で、配送経路が生きていることを本人が生前に検証する
 
 v1 は CLI + GitHub Actions で完結。Web 復号 UI・k-of-n 人間トラスティ・受領者ごとの個別ペイロードは v2。
@@ -36,7 +35,7 @@ A digital end-of-life kit: an owner-operated, serverless dead man's switch (GitH
 | Persona | Description | Capabilities assumed |
 |---|---|---|
 | **Owner** | Software engineer preparing 終活. Runs macOS/Linux, has GitHub account, SSH keys, can operate CLI and GitHub Actions secrets. | Full technical capability. |
-| **Recipient** | Owner's family member (e.g. spouse). Non-technical. Can use a smartphone camera (QR), a web browser, and follow a printed Japanese step-by-step guide. May enlist a "helper". | No CLI knowledge. Japanese reading. |
+| **Recipient** | Owner's family member (e.g. spouse). Non-technical. Can use a smartphone camera (QR), a web browser, and follow a printed Japanese step-by-step guide. May enlist a "helper". | No CLI knowledge. Japanese reading. **Must have access to a Windows or macOS PC (family PC or a helper's) at recovery time — v1 recovery runs a bundled program; there is no phone-only path (web decryptor is v2).** |
 | **Helper** | Optional IT-literate acquaintance or professional assisting a Recipient at recovery time. | Can run a downloaded binary or `age` following instructions. |
 
 ### 2.3 Language policy
@@ -51,7 +50,7 @@ A digital end-of-life kit: an owner-operated, serverless dead man's switch (GitH
 
 1. **The trigger must outlive the owner.** No infrastructure whose continued operation depends on the owner's payments or hardware (research 01: self-hosting paradox).
 2. **No single party can decrypt alone.** Not GitHub, not the mail provider, not a recipient before the trigger, not a thief of any one artifact (2-of-2 split, §5).
-3. **The kit must outlive the project.** Ciphertext is standard age v1; paper artifacts are self-describing; recovery must be possible with third-party tools (§5.4).
+3. **The kit must outlive the project.** Ciphertext is standard age v1; paper artifacts are self-describing; the Recovery-Sheet path must remain decryptable with third-party age tools alone, and the share path carries its own binaries for 4 platforms (§5.4).
 4. **False-fire is embarrassing; missed-fire is catastrophic; both are design failures.** Escalation ladder with a human safety-check phase before release (§9).
 5. **Non-technical recipient UX is a v1 requirement, not a nicety.** Printed Japanese guide + QR codes + interactive wizard (§8 `open`, §14).
 6. **Everything fails; every failure has a documented fallback.** Ultimate backstop is paper in the owner's safe, reachable via ordinary probate (§13).
@@ -137,7 +136,8 @@ cmd/keepsake/main.go            # dispatch only
 internal/cliutil/               # router, printer (ja/en), exit codes, prompts
 internal/version/               # version, embedded at build (ldflags)
 internal/config/                # schemas, strict YAML load, validation
-internal/payload/               # payload walk, manifest, deterministic tar
+internal/content/               # embedded Japanese/English content pack (templates, copy)
+internal/payload/               # payload walk, manifest, deterministic tar, hardened extraction
 internal/crypto/agefile/        # age seal/open wrappers
 internal/crypto/keys/           # KEK generation, split/combine orchestration
 internal/shamir/                # VENDORED from vault v1.14.8 (MPL-2.0)
@@ -145,10 +145,13 @@ internal/encoding/sharetext/    # §7 codec (encode/decode/checksum)
 internal/bundle/                # recipient bundle builder + verification
 internal/guide/                 # printable HTML guides, QR embedding
 internal/checkin/               # statement format, SSH sign/verify
-internal/statemachine/          # §9 pure evaluation engine
+internal/statemachine/          # §9 pure evaluation engine (Plan/Apply)
 internal/mail/                  # composer, templates, SMTP send (go-mail)
 internal/gh/                    # minimal GitHub REST client (dispatch-run verification)
 internal/trigger/               # trigger repo scaffold/update, monitor orchestration
+internal/vault/                 # owner-side command orchestration (init/seal/open/verify/status/checkin/drill)
+internal/dist/                  # verified download of release artifacts (checksums enforced)
+internal/sectest/               # security test harness (test-only, issue 28)
 ```
 
 Dependency allowlist: §10.6.
@@ -248,6 +251,8 @@ owner:
   ssh_signing_key: "~/.ssh/id_ed25519"  # private key file used by `checkin`
   allowed_signers:                    # ≥1 entries, OpenSSH allowed_signers line format
     - "taro@example.com ssh-ed25519 AAAA..."
+    # v1 accepts key types ssh-ed25519 / ecdsa-sha2-nistp256 only; lines with
+    # options (e.g. valid-after, namespaces) are rejected at validation
 recipients:                           # 1..10 entries
   - name: "山田花子"
     relation: "妻"                    # free text, shown in mails/guides
@@ -276,11 +281,11 @@ Validation (single pass, all errors reported together): strict fields (unknown k
 
 ### 6.5 `keepsake.yaml` (trigger repo) — generated, schema v1
 
-Subset of §6.4: `version, owner{name,email,github_login}, allowed_signers, recipients[{name,email}], timing, mail, binary{path,sha256,version}`. No paths from the owner's machine, no ssh private key reference, no secrets. Regenerated by `trigger init` / `trigger update`; hand-edits allowed but must re-validate (monitor validates on every run; invalid config → owner error mail + job failure, never silent).
+Subset of §6.4 plus the repo identity: `version, repo ("owner/name", used for the E-MON-REPO runtime check), owner{name,email,github_login}, allowed_signers, recipients[{name,email}], timing, mail, binary{path,sha256,version}`. No paths from the owner's machine, no ssh private key reference, no secrets. Regenerated by `trigger init` / `trigger update`; hand-edits allowed but must re-validate (monitor validates on every run; invalid config → owner error mail + job failure, never silent).
 
 ### 6.6 Manifests
 
-`seal-manifest.json` (local, 0600): `{schema:1, sealed_at, kit_sha256, kit_size, payload_file_count, payload_total_size, kek_fingerprint (SHA-256 of KEK, first 8 bytes hex), share_g_text, share_r_checksum_group, share_g_checksum_group, binary_version, recipients:[emails]}`.
+`seal-manifest.json` (local, 0600): `{schema:1, sealed_at, kit_sha256, kit_size, payload_file_count, payload_total_size, payload_digest, kek_fingerprint (SHA-256 of KEK, first 8 bytes hex), share_g_text, share_r_checksum_group, share_g_checksum_group, mail_auth_code, binary_version, recipients:[emails]}`. `payload_digest` = SHA-256 over the canonical sorted `(path, size, sha256)` triples of the payload (no timestamps) — used by `verify`/`status` for drift detection without decrypting.
 `manifest.json` (bundle): `{schema:1, kit_format:1, sealed_at, kit_sha256, kit_size, tools:{name:sha256}, guide_version, share_r_checksum_group, kek_fingerprint}`. No secret material; `share_r_checksum_group` is the 4-char checksum of share_R (already on the same medium) used by `verify`; `kek_fingerprint` lets `verify`/`open` confirm combined KEK correctness before attempting decryption.
 
 ### 6.7 Check-in statement (`state/checkin.json` + `state/checkin.sig` in trigger repo)
@@ -288,7 +293,7 @@ Subset of §6.4: `version, owner{name,email,github_login}, allowed_signers, reci
 ```json
 {"version":1,"counter":42,"timestamp":"2026-07-10T09:00:00Z","note":""}
 ```
-Canonical bytes = the exact file bytes (no re-serialization). Signature: SSHSIG armored, namespace `keepsake-checkin`, produced with owner key; verified against `allowed_signers`. Monitor acceptance: signature valid AND `counter > state.accepted_counter` AND `timestamp ≤ now+15min`. Counter recovery on a new machine: CLI reads `state.json.accepted_counter` from the trigger repo and continues from max+1.
+Canonical bytes = the exact file bytes (compact single-line JSON, `SetEscapeHTML(false)`, one trailing LF; no re-serialization before verify). Signature: SSHSIG armored, namespace `keepsake-checkin`, hash sha512, produced with owner key (ed25519 or ecdsa-p256 — the only key types supported in v1, matching §6.4 `allowed_signers` validation; option-bearing allowed_signers lines are rejected). Monitor acceptance: signature valid AND `counter > state.accepted_counter` AND `timestamp ≤ now+15min` (timestamp layout `2006-01-02T15:04:05Z`, UTC only). Counter recovery on a new machine: CLI reads the trigger repo's `state.json.accepted_counter` and current `checkin.json` counter and continues from max+1.
 
 ### 6.8 Monitor state (`state/state.json` in trigger repo, committed by monitor)
 
@@ -296,17 +301,27 @@ Canonical bytes = the exact file bytes (no re-serialization). Signature: SSHSIG 
 {
   "schema": 1,
   "phase": "ACTIVE|REMINDING|ALERTING|RELEASED",
-  "accepted_counter": 42,
-  "last_valid_checkin": "2026-07-10T09:00:00Z",
-  "last_checkin_channel": "cli|dispatch",
-  "last_run_at": "2026-07-11T21:23:41Z",
+  "initialized_at": "2026-07-10T09:00:00Z",
+  "armed": false,
+  "accepted_counter": 0,
+  "last_valid_checkin": null,
+  "last_checkin_channel": null,
+  "last_run_at": null,
   "last_remind_sent_at": null,
   "last_alert_sent_at": null,
-  "release": {"released_at": null, "sent": {"hanako@example.com": "2026-08-21T21:24:00Z"}, "confirm_sends": 0},
+  "last_unarmed_warning_at": null,
+  "pause_active": false,
+  "invalid_sig_warned": false,
+  "release": {
+    "released_at": null,
+    "sent": {"hanako@example.com": "2026-08-21T21:24:00Z"},
+    "confirm": {"hanako@example.com": {"count": 0, "last_at": null}},
+    "last_alive_mail_at": null
+  },
   "history": [{"at":"...","event":"PHASE_CHANGE","from":"ACTIVE","to":"REMINDING","detail":""}]
 }
 ```
-`history` capped at 500 entries (oldest dropped). state.json is informational + idempotency record; authenticity of check-ins never derives from it alone (§6.7, §11.3).
+`history` capped at 500 entries (oldest dropped). `armed` becomes true at the first accepted check-in and never reverts; while unarmed the switch makes no escalation decisions (§9.1 T-1). state.json is informational + idempotency record; authenticity of check-ins never derives from it alone (§6.7, §11.3). Schema ownership: issue 19 (the state machine) owns this schema; other issues change it only through issue-19 amendments.
 
 ---
 
@@ -324,16 +339,16 @@ CHECK  = first 4 Crockford chars of SHA-256(role-byte || raw-bytes)
 
 Example (share): `KEEPSAKE-R1-04X2-...-9TQD-K7M2`
 
-- Decoder: case-insensitive; maps `I→1, L→1, O→0, U→V`(reject U? Crockford excludes U — treat as error); ignores spaces and dashes anywhere; validates length for role, then checksum. Errors are specific: `E-SHARE-LEN`, `E-SHARE-CHK`, `E-SHARE-ROLE`, `E-SHARE-CHAR` (each with a Japanese + English message in the wizard).
-- The final CHECK group (4 chars) doubles as the **anti-phishing token**: the printed recipient guide shows the expected CHECK group of share_G, so a recipient can validate that a "release mail" is genuine before trusting it (§10.5 A7).
-- QR payload = the exact same string. QR error correction level M.
-- Fuzz + property tests required (round-trip, mutation detection ≥ any single-char error).
+- Decoder pipeline (normative, in this order): (0) reject input >1024 bytes; (1) fold full-width ASCII forms U+FF01–U+FF5E to ASCII and U+3000 to space (Japanese IME tolerance; no external Unicode dependency — a 20-line mapping); (2) uppercase (ASCII); (3) strip every ignored character: space, TAB, CR, LF, hyphen-minus, U+2010, U+2212; (4) require literal prefix `KEEPSAKE`, then one role char ∈ {R,G,K}, then version char `1`; (5) the remainder is DATA‖CHECK where CHECK is the last 4 chars; apply alias mapping `O→0, I→1, L→1` to DATA and CHECK only; (6) validate charset (Crockford alphabet; `U` and anything else → error), length by role, then checksum. Errors are specific codes: `E-SHARE-LEN`, `E-SHARE-CHK`, `E-SHARE-ROLE`, `E-SHARE-VER`, `E-SHARE-CHAR` (each with a Japanese + English message in the wizard).
+- The CHECK group is an **integrity check only** (20 bits — too short to authenticate mail). Mail authentication uses a dedicated **mail-auth code**: the first 8 Crockford chars of `SHA-256("keepsake-mail-auth" || raw share_G bytes)` (40 bits). It is printed on the recipient guide and included in every release/postrelease mail; a recipient matches paper against mail (§10.5 A7). It is a shared secret between the paper guide and the genuine mail — an attacker who has not seen the paper cannot forge it except with probability 2⁻⁴⁰ per attempt; an attacker who photographed the guide defeats it (documented residual risk; the other two signals — fixed sender, "no one will ever ask you to send anything back" — still apply).
+- QR payload = the exact same sharetext string. QR error correction level M.
+- Fuzz + property tests required (round-trip; a committed corpus of deterministic single-character mutations in the DATA/CHECK region must all be rejected — formatting characters and alias-equivalent substitutions are exempt by design).
 
 ---
 
 ## 8. CLI Command Surface
 
-Global flags: `--vault PATH`, `--lang ja|en` (wizard/messages; default: `ja` if `LANG` contains `ja`, else `en`), `--json` (machine-readable output where noted), `--yes` (suppress confirmations). Exit codes: 0 ok; 1 generic error; 2 usage; 3 validation failed; 4 integrity/crypto failure; 5 network/remote failure.
+Global flags: `--vault PATH` (precedence: flag > `KEEPSAKE_VAULT` env > default `~/KeepsakeVault`; `~` expanded, path cleaned), `--lang ja|en` (wizard/messages; default: `ja` if `LC_ALL`/`LANG` — in that precedence — contains `ja` case-insensitively, else `en`), `--json` (machine-readable output where noted; NOT supported by `seal`, which must print share_G interactively exactly once), `--yes` (suppress confirmations), `--show-pii` (un-redact emails in `--json` outputs; §10.7). Global flags are accepted both before and after the subcommand. Exit codes: 0 ok; 1 generic error; 2 usage; 3 validation failed; 4 integrity/crypto failure; 5 network/remote failure.
 
 | Command | Purpose | Key behaviors (normative) |
 |---|---|---|
@@ -343,10 +358,10 @@ Global flags: `--vault PATH`, `--lang ja|en` (wizard/messages; default: `ja` if 
 | `keepsake open` | Recipient decryption wizard | interactive (ja default): locate `kit.age` (arg or same-dir autodetect), prompt share_R (auto-read `share-R.txt` if beside kit, confirm), prompt share_G (typed/pasted from mail), validate both (§7 errors in plain language), combine, check `kek_fingerprint` if manifest present, decrypt to `./keepsake-opened/` (0700), print next-step message pointing at `00-README-FIRST.md`. Non-interactive mode: `--kit --share-r-file --share-g "..." --out`. |
 | `keepsake verify` | Owner self-test | config validation; bundle integrity (manifests, checksums, tools checksums); share round-trip: reads share_G from seal-manifest + share_R from bundle, combines, compares kek_fingerprint, test-decrypts kit.age header (or full with `--deep`); prints report; exit 3/4 on failure. |
 | `keepsake guide` | (Re)generate printable HTML guides | writes both guides from current config + seal-manifest (needs a prior seal for QR/checksum data). |
-| `keepsake checkin` | Liveness signal via git | bump counter, write+sign statement (§6.7), commit + push to trigger repo (`trigger.local_path`; clones/pulls first; conflict → pull --rebase once, retry once). Prints current phase from last known state.json. `--note`. |
+| `keepsake checkin` | Liveness signal via git | bump counter, write+sign statement (§6.7), commit + push to trigger repo (`trigger.local_path` must be an existing clone — cloning is a documented one-time manual step; pulls first; push race → pull --rebase once, retry once; conflicts abort cleanly). Prints facts from last known state.json. `--note`. |
 | `keepsake monitor` | Trigger-side evaluation (runs in Actions; also locally testable) | see §11.3. Flags: `--repo-dir`, `--now` (test), `--drill`, `--dry-run` (no send/commit, print action plan). |
 | `keepsake trigger init` | Scaffold trigger repo directory | writes keepsake.yaml (from vault config), workflows, vendored binary (§8.1) + `.sha256`, README-switch.md incl. the **manual secrets checklist** (KEEPSAKE_SHARE_G, KEEPSAKE_SMTP_URL[, _SECONDARY]) — owner sets secrets by hand; keepsake never touches GitHub secret APIs. |
-| `keepsake trigger update` | Refresh binary/workflows after upgrade | re-vendor binary at `trigger.binary_version`, regenerate workflows + keepsake.yaml preserving hand-edited timing (three-way: regenerate, but refuse if local uncommitted changes). |
+| `keepsake trigger update` | Refresh binary/workflows after upgrade | re-vendor binary at `trigger.binary_version`; regenerate ALL generated files from vault config. Hand-edited `keepsake.yaml` → refuse with a field diff unless `--take-vault` or `--keep-repo`; hand-edited workflows are unsupported (always overwritten). Refuses on uncommitted changes in generated paths. |
 | `keepsake drill` | Run a full test-fire | convenience wrapper: triggers monitor workflow via `gh workflow run monitor.yml -f drill=true` if `gh` present, else prints exact manual steps. Verifies afterwards via Actions API that the run succeeded. |
 | `keepsake version` | Version info | semver + commit, `--json`. |
 
@@ -366,15 +381,16 @@ Pure function (no I/O): `Evaluate(cfg Timing, st State, checkins CheckinFacts, n
 
 | # | Condition (evaluated in order) | Phase | Actions |
 |---|---|---|---|
-| T0 | new valid check-in with phase ∈ {ACTIVE, REMINDING, ALERTING} | → ACTIVE | record channel+timestamp; if previous phase ≠ ACTIVE, send owner "check-in received, switch reset" mail |
-| T1 | `pause_until` set AND now < pause_until (and phase ≠ RELEASED) | ACTIVE (reason=paused) | none (pause validated ≤90d at config load) |
+| T-1 | `armed == false` (no check-in ever accepted) | ACTIVE (unarmed) | NO escalation of any kind; owner "setup incomplete — check in once to arm the switch" mail if `initialized_at` ≥7 days ago and `last_unarmed_warning_at` null or ≥7 days ago |
+| T0 | new valid check-in with phase ∈ {ACTIVE, REMINDING, ALERTING} | → ACTIVE (sets `armed=true`) | record channel+timestamp; if previous phase ≠ ACTIVE, send owner "check-in received, switch reset" mail |
+| T1 | `pause_until` set AND now < pause_until (and phase ≠ RELEASED) | ACTIVE (paused) | no mails; history entries `PAUSE_START`/`PAUSE_END` on transitions (tracked via `pause_active`) |
 | T2 | elapsed < remind_after | ACTIVE | none |
 | T3 | remind_after ≤ elapsed < alert_after | REMINDING | owner reminder mail if `last_remind_sent_at` is null or ≥ remind_every_days ago |
 | T4 | alert_after ≤ elapsed < release_after | ALERTING | owner reminder (same cadence); recipient safety-check mail ("please contact the owner"; NO key material) if `last_alert_sent_at` null or ≥ alert_every_days ago |
-| T5 | elapsed ≥ release_after | RELEASED (sticky) | release mail (share_G + instructions + anti-phishing CHECK group context) to each recipient not yet in `release.sent`; then confirmation re-sends every postrelease_confirm_every_days up to postrelease_confirm_count |
-| T6 | valid check-in while RELEASED | RELEASED (stays) | owner mail "switch already fired — share_G must be considered burned; rotate now" (weekly max) |
+| T5 | elapsed ≥ release_after | RELEASED (sticky) | **pre-release final check first (§11.3 step 6)**; then release mail (share_G + instructions + mail-auth code) to each recipient not yet in `release.sent`; then per-recipient confirmation re-sends every postrelease_confirm_every_days up to postrelease_confirm_count (tracked in `release.confirm[email]`) |
+| T6 | valid check-in while RELEASED | RELEASED (stays) | owner mail "switch already fired — share_G must be considered burned; rotate now" (weekly max via `release.last_alive_mail_at`) |
 
-Rules: transitions are computed fresh each run from durable facts (idempotent, missed-cron tolerant); send-then-persist ordering (duplicate mail is tolerated; silently-missed mail is not); RELEASED is never auto-exited (rotation runbook only); drill mode (§11.4) leaves state.json untouched except appending a `DRILL_RUN` history entry and never uses real share_G.
+Rules: transitions are computed fresh each run from durable facts (idempotent, missed-cron tolerant); send-then-persist ordering (duplicate mail is tolerated; silently-missed mail is not) — realized as a pure two-step contract: `Evaluate(...) → Plan` (no state mutation) and `Apply(prev, plan, sendResults, now) → State'` (folds only successful sends into dedup/sent records); RELEASED is never auto-exited (rotation runbook only); drill mode (§11.4) leaves state.json untouched except appending a `DRILL_RUN` history entry and never uses real share_G.
 
 ### 9.2 Default timeline (defaults from §6.4)
 
@@ -449,18 +465,18 @@ Config validation (§6.4) guarantees ≥7 days between first recipient alert and
 | A4 | Thief steals bundle USB (or backup copy) | has A-3+A-5; cannot decrypt; owner rotates on known theft (runbook) |
 | A5 | Owner GitHub account compromised (read) | attacker gets share_G (A-4) only: useless without physical bundle. Rotate per runbook. |
 | A6 | Owner GitHub account compromised (write) — early-fire, config tamper, or switch deletion | Early-fire: recipients get share_G early; only recipients (who hold share_R) gain anything, and owner is notified (T6 mail + release mails are BCC'd to owner) → rotate. DoS/deletion: switch silently dead → mitigations: owner notices missing reminder cadence (documented expectation), annual drill, GitHub 2FA hardware-key recommendation; ultimate backstop = safe Recovery Sheet via probate. |
-| A7 | Phishing mail pretending to be the release mail | Printed guide carries share_G's expected 4-char CHECK group + fixed sender address + instruction "no one will ever ask you to send shares back" |
+| A7 | Phishing mail pretending to be the release mail | Printed guide carries the 8-char **mail-auth code** (§7; 40-bit paper↔mail shared secret) + fixed sender address + instruction "no one will ever ask you to send shares back"; residual risk if the printed guide itself is photographed (documented) |
 | A8 | Malicious PR / dependency compromise in OSS repo | branch protection, review requirement, pinned deps + govulncheck + dependabot, actions pinned by SHA, vendored crypto with provenance; trigger repos pin binary by sha256 (upgrade is a deliberate owner action) |
 | A9 | Tampered binary or workflow inside trigger repo (post-compromise) | equivalent to A6-write; sha256 self-check catches accidental corruption, not malicious rewrite of both binary and checksum — documented residual risk of A-8 boundary |
 | A10 | Burglar opens owner's safe (Recovery Sheet) | P alone decrypts only if they ALSO obtain kit.age (bundle/USB). Sheet instruction: never store a bundle in the same safe. Rotate on known safe breach. |
 
 ### 10.6 Dependency and supply-chain policy
 
-- Direct deps allowlist (anything else requires an ADR): `filippo.io/age`, `golang.org/x/crypto` (SSHSIG), `gopkg.in/yaml.v3`, `github.com/wneessen/go-mail`, one QR lib (`github.com/skip2/go-qrcode` or `github.com/yeqown/go-qrcode/v2` — decided in issue 14), stdlib. Test-only: `github.com/google/go-cmp`.
+- Direct deps allowlist (anything else requires an ADR): `filippo.io/age`, `golang.org/x/crypto` (SSHSIG), `golang.org/x/term` (no-echo prompts), `golang.org/x/mod` (semver compare), `gopkg.in/yaml.v3`, `github.com/wneessen/go-mail`, one QR encode lib (`github.com/skip2/go-qrcode` or `github.com/yeqown/go-qrcode/v2` — decided in issue 16), stdlib. Test-only: `github.com/google/go-cmp`, one QR decode lib for round-trip tests (e.g. `github.com/makiuchi-d/gozxing`). The allowlist governs DIRECT dependencies; transitive requirements of allowlisted modules are accepted (audited via `govulncheck`).
 - `internal/shamir` vendored from `hashicorp/vault` tag **v1.14.8** (last MPL-2.0), headers + `LICENSES/MPL-2.0.txt` + provenance in `NOTICE` (research 02).
 - CI: `govulncheck`, `golangci-lint`, `gitleaks`, tests with `-race`; all third-party actions pinned to commit SHAs; workflow `permissions:` least-privilege.
 - Go toolchain pinned via `go.mod` `toolchain` directive; releases built by CI only.
-- Project license: **Apache-2.0** (pending owner confirmation — see ISSUE_PLAN known unknowns KU-6) with MPL-2.0 for vendored files.
+- Project license: **Apache-2.0** (confirmed by owner 2026-07-10; KU-6 resolved) with MPL-2.0 preserved for vendored files.
 
 ### 10.7 Privacy
 
@@ -500,7 +516,9 @@ jobs:
           KEEPSAKE_SMTP_URL: ${{ secrets.KEEPSAKE_SMTP_URL }}
           KEEPSAKE_SMTP_URL_SECONDARY: ${{ secrets.KEEPSAKE_SMTP_URL_SECONDARY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./bin/keepsake-linux-amd64 monitor --repo-dir . ${{ inputs.drill && '--drill' || '' }}
+          # `inputs` context only exists for workflow_dispatch — guard explicitly so scheduled runs never see it
+          KEEPSAKE_DRILL: ${{ (github.event_name == 'workflow_dispatch' && inputs.drill) && 'true' || 'false' }}
+        run: ./bin/keepsake-linux-amd64 monitor --repo-dir . $([ "$KEEPSAKE_DRILL" = "true" ] && echo --drill)
 ```
 
 ### 11.2 `checkin-button.yml`
@@ -522,23 +540,26 @@ The monitor verifies dispatch check-ins exclusively through `GET /repos/{repo}/a
 ### 11.3 Monitor execution sequence
 
 1. Load + validate `keepsake.yaml` (fail-closed: on invalid config, mail owner error if SMTP config itself is valid, exit non-zero, make NO release decisions).
-2. Refuse to proceed if forbidden files present (`kit.age`, `share-R*`) — §10.2.
-3. Gather check-in facts: verify `state/checkin.json(.sig)` (§6.7); query dispatch runs since `state.last_run_at − 48h`; compute `last_valid_checkin = max(signed, dispatch)`.
-4. `Evaluate()` (§9) with `now = time.Now().UTC()`; execute returned actions (mail sends, §12) — send-then-persist.
-5. Persist `state/state.json`, commit (`keepsake-monitor: <phase> day <elapsed>`) and push — this commit is also the heartbeat (research 03 C1/C2). Push conflict → fetch/rebase once → retry once → else fail (next run recovers).
-6. Exit non-zero iff an action failed (visible in Actions UI + GitHub failure notification to owner as extra signal).
+2. Refuse to proceed if forbidden files present (tracked files whose basename matches `kit.age`, `*.age`, or `share-R*`, case-insensitive) — §10.2.
+3. Gather check-in facts: verify `state/checkin.json(.sig)` (§6.7); query dispatch runs since `state.last_run_at − 48h` (since `initialized_at` on first run); compute `last_valid_checkin = max(signed, dispatch)`. `accepted_counter` advances only from valid SIGNED statements (dispatch check-ins carry no counter). **If the Actions API is unreachable: evaluate with signed facts only, NEVER execute release-tier actions this run (fail-closed toward no-release), mail owner, exit non-zero.** If no check-in was ever accepted the switch is unarmed (§9.1 T-1).
+4. Read env: `KEEPSAKE_SHARE_G` (validated as sharetext role G — mismatch [E-MON-SHARE] → owner mail + exit 4; **never read in drill mode**), `KEEPSAKE_SMTP_URL[_SECONDARY]`, `GITHUB_TOKEN`, `GITHUB_REPOSITORY` (must equal `keepsake.yaml` `repo` when `GITHUB_ACTIONS=true` [E-MON-REPO]).
+5. `Evaluate()` (§9) with `now = time.Now().UTC()` producing a Plan (no mutation).
+6. **Pre-release final check**: if the Plan contains release actions — `git fetch` + re-read `state/checkin.json(.sig)` + re-query dispatch runs; a newer valid check-in aborts the release actions for this run (closes the checkin-vs-monitor race).
+7. Execute actions (mail sends, §12) — send-then-persist; fold per-send results via `Apply()`.
+8. Persist `state/state.json`, commit and push (message `keepsake-monitor: <phase> day <elapsed>`; author `keepsake-monitor <keepsake-monitor@users.noreply.github.com>`; staged path exactly `state/state.json`; `GIT_TERMINAL_PROMPT=0`) — this commit is also the heartbeat (research 03 C1/C2). Push conflict → fetch/rebase once (merge = per-recipient union of send successes, max of timestamps/counters) → retry once → else fail (next run recovers).
+9. Exit non-zero iff an action failed (visible in Actions UI + GitHub failure notification to owner as extra signal).
 
 ### 11.4 Drill semantics
 
-`--drill`: full pipeline with (a) subjects prefixed `[DRILL]` and a leading explanation block, (b) share_G replaced by `KEEPSAKE-G1-TEST...` placeholder (never reads the real secret), (c) forced phase walk: sends one owner reminder, one recipient safety-check, one release-template mail to every recipient, (d) no state.json mutation except `history` gets a `DRILL_RUN` entry (committed — doubles as heartbeat), (e) exit code reflects delivery success per recipient. Runbook: annual drill (owner calendar), verify every recipient confirms receipt.
+`--drill`: full pipeline with (a) subjects prefixed `[DRILL]` and a leading explanation block, (b) share_G replaced by a deterministic sharetext-valid placeholder (the real secret env var is never read), (c) forced phase walk sending exactly `1 + N + N` mails for N recipients: one owner reminder, one safety-check per recipient, one release-template per recipient, (d) no state.json mutation except `history` gets a `DRILL_RUN` entry (committed — doubles as heartbeat), (e) per-recipient results reported in the run output; exit is non-zero iff any delivery failed. Runbook: annual drill (owner calendar), verify every recipient confirms receipt.
 
 ---
 
 ## 12. Mail Delivery
 
-- Sender: `internal/mail` using go-mail; SMTP endpoint parsed from `KEEPSAKE_SMTP_URL` (`smtps://user:pass@host:port` or `smtp+starttls://…`); on send failure of the batch → retry once after 30s → try `KEEPSAKE_SMTP_URL_SECONDARY` if set; per-recipient outcome recorded (state.json), failed recipients retried next daily run.
+- Sender: `internal/mail` using go-mail; SMTP endpoint parsed from `KEEPSAKE_SMTP_URL` (`smtps://user:pass@host:port` or `smtp+starttls://…`; both username and password required; plaintext `smtp://` rejected). TLS is always verified (no InsecureSkipVerify; STARTTLS mandatory before AUTH for the `smtp+starttls` scheme). One message per recipient (never multiple family addresses in one To header); per-message failure → retry once after 30s on primary → secondary endpoint if set; per-recipient outcome recorded (state.json), failed recipients retried next daily run.
 - All owner-bound and recipient-bound templates (Japanese primary + short English footer): `remind_owner`, `checkin_reset`, `alert_recipients`, `release`, `postrelease_confirm`, `released_but_alive`, `config_error_owner`, plus `[DRILL]` variants. Templates embedded (`go:embed`), rendered with `text/template` (plain text mails only — no HTML mail in v1: maximizes deliverability + carrier compatibility).
-- Release mail body contains: what happened (plain Japanese), share_G string + QR? (QR in mail = attachment/PNG — skip; text only), the 4-char CHECK context sentence, exact `keepsake open` steps, `age` fallback pointer, "no one will ever ask you to send this back" warning, owner-configured `mail.from` consistency note.
+- Release mail body contains: what happened (plain Japanese), the share_G string (text only — no attachments), the 8-char mail-auth code with the paper-matching instruction (§7), exact `keepsake open` steps, the clarification that the `age`-only fallback applies to the Recovery-Sheet path, "no one will ever ask you to send this back" warning, owner-configured `mail.from` consistency note.
 - Every recipient-bound mail BCCs the owner (§10.5 A6 detection).
 - Header injection prevention: addresses validated at load AND at compose; template values that end up in headers are restricted to validated config fields.
 
@@ -562,7 +583,7 @@ The monitor verifies dispatch check-ins exclusively through `GET /repos/{repo}/a
 | F10 | Owner loses laptop/vault | — | bundle + Recovery Sheet unaffected; rebuild vault from templates; rotate if theft suspected |
 | F11 | Recipient loses bundle | owner notices at annual drill conversation | re-issue identical bundle; rotate if theft suspected |
 | F12 | False release (owner alive) | T6 owner mail + BCC copies | rotation runbook (new KEK, re-seal, re-distribute, new share_G secret) |
-| F13 | KEK sheet destroyed (house fire) | owner discovers | shares still work (bundle + GitHub); re-print sheet from `seal-manifest` — wait: sheet = P = KEK; regenerate via `keepsake guide` from seal-manifest (share_G copy + share_R needed → owner holds both in vault state/ + bundle) |
+| F13 | Recovery Sheet destroyed | owner discovers | If the vault (`seal-manifest.json` with share_G copy) plus any bundle (share_R) are still accessible, regenerate the sheet via `keepsake guide` (it recombines P). If the vault or all bundles were lost too (e.g. house fire), rotate: re-seal from payload sources and redistribute. |
 | F14 | Payload drift (accounts changed, kit stale) | `status` drift warning | re-seal + re-distribute (runbook cadence: annually or on major life event) |
 | F15 | Actions minutes quota exhausted (owner's other private repos consumed the monthly free quota; over-quota private-repo usage is blocked without a payment method) | monitor runs skipped near month-end; Actions UI shows blocked runs | day-granular recompute catches up when quota resets (≤1 month delay worst case, within release tolerances); runbook guidance: keep the trigger repo on an account with minimal other private Actions usage; drill verifies |
 
@@ -575,7 +596,7 @@ The monitor verifies dispatch check-ins exclusively through `GET /repos/{repo}/a
 | KU-3 | QR library final selection (maintenance, print-DPI quality) | swap between the two MIT candidates |
 | KU-4 | Japanese rendering fidelity of printable HTML across OS/browsers (fonts) | may need embedded font subset (license-checked) |
 | KU-5 | Windows SmartScreen / macOS Gatekeeper friction for `tools/` binaries | more guide detail; v2 signing/notarization |
-| KU-6 | Project license final confirmation (Apache-2.0 proposed) | ADR-002/NOTICE update; must be settled before first public release |
+| KU-6 | ~~Project license confirmation~~ **RESOLVED 2026-07-10: Apache-2.0 confirmed by owner** | — |
 | KU-7 | `age` CLI availability/behavior drift for the interop CI gate | pin age version in CI; the format spec is the real contract |
 
 ---

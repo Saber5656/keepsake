@@ -1,47 +1,47 @@
 # Title
 
-Japanese content pack: payload templates, bundle README, guide and mail wording source
+Japanese content pack: payload templates, bundle README, guide copy, config template
 
 ## Summary
 
-Author all Japanese (plus short English fallback) recipient- and owner-facing text as embedded assets: payload starter templates, bundle README (html+txt source), printable-guide copy, and the wording blocks reused by mail templates.
+Author the non-mail Japanese (plus short English fallback) content as embedded assets: payload starter templates, the plaintext bundle README, the prose blocks for both printable guides, the commented config template used by `init`, and the `PLACEHOLDERS.md` inventory contract. Mail wording is explicitly OUT of scope (issue 21 owns ALL mail content).
 
 ## Context
 
-DESIGN §2.2/§2.3: recipients are non-technical Japanese family members; the printed guide and templates ARE the recipient UX. Centralizing wording in one issue keeps tone consistent and lets a human review all family-facing text at once.
+DESIGN §2.2/§2.3: recipients are non-technical Japanese family members; the printed guide and templates ARE the recipient UX. Centralizing wording lets a human review all family-facing text at once; the placeholder inventory is the contract that issues 16/21 render against.
 
 ## Scope
 
-- `internal/content/` (new package, embedded via `go:embed`):
-  - `payload-templates/00-README-FIRST.md` (最初に読んでください — letter skeleton)
-  - `payload-templates/10-accounts.md` (アカウント台帳: bank/securities/insurance/pension/subscriptions/phone/utilities table skeleton — NO password columns; pointer row to password-manager export file)
-  - `payload-templates/20-credentials/README.md` (パスワードマネージャのエクスポート置き場の説明と手順リンク欄)
-  - `payload-templates/30-wishes.md` (葬儀・連絡してほしい人・遺影・SNS 処理などの意向)
-  - `payload-templates/40-documents/README.md` (保険証券・登記などスキャン置き場)
-  - `bundle/README-ja.txt` (short: これは何か・開け方はガイド参照・勝手に開けない約束の文言)
-  - `guide/recipient-guide-copy.md`, `guide/owner-safe-sheet-copy.md` (copy blocks with `{{placeholders}}` consumed by issue 16)
-  - `mailcopy/*.md` (wording blocks with placeholders consumed by issue 21)
-- `internal/content/content.go` (embed + accessor `FS()`)
+- `internal/content/` (embedded via `go:embed`):
+  - `payload-templates/00-README-FIRST.md`, `payload-templates/10-accounts.md`, `payload-templates/20-credentials/README.md`, `payload-templates/30-wishes.md`, `payload-templates/40-documents/README.md`
+  - `bundle/README-ja.txt`
+  - `guide/recipient-guide-copy.md`, `guide/recovery-sheet-copy.md` (aka owner safe sheet — file header states the alias)
+  - `config-template.yaml` (commented, `REPLACE_ME` placeholders; consumed by issue 10)
+  - `PLACEHOLDERS.md` (inventory: name, meaning, source field — for guide placeholders; issue 21 extends it with mail placeholders)
+  - `content.go`: `func FS() fs.FS` returning the embedded tree rooted at the paths above (content-relative, `internal/content/` prefix stripped)
+- `internal/content/content_test.go`
 
 ## Detailed Requirements
 
-1. All family-facing text in polite Japanese (です・ます), no technical jargon without a one-line explanation; each file ends with a short English summary section for helpers.
-2. Recipient guide copy MUST cover, in order: これは何？ / いつ届く？（メールの説明とニセモノの見分け方 = CHECK group照合, 差出人固定, 「シェアを返信させる依頼は全て詐欺」）/ 開け方 Windows / 開け方 Mac /（うまくいかない時）age での代替手順は金庫の紙の場合のみ / メールが来ないままの場合（金庫・遺言・相続手続きへの導線）/ 困ったら（helper 連絡先欄）。
-3. Owner safe-sheet copy: これ一枚で開けられる警告 / USB と同じ場所に保管しない指示 / `age -d kit.age` 手順 / 印刷日・ローテーション日欄。
-4. Payload templates contain placeholder rows/examples, not real data; every template's header comment says it will be encrypted as-is.
-5. Placeholders use `{{name}}` syntax with an inventory table in `internal/content/PLACEHOLDERS.md` (name, meaning, source field) — issues 16/21 must satisfy this contract.
-6. No binary assets (fonts/images) in v1 (KU-4 noted in guide copy file header).
-7. `content_test.go`: every embedded file is valid UTF-8, non-empty, and every `{{placeholder}}` appears in PLACEHOLDERS.md.
+1. All family-facing text: polite Japanese (です・ます), no unexplained jargon; each file ends with a short English summary section for helpers.
+2. `recipient-guide-copy.md` MUST cover, in order: これは何？ / いつメールが届く？ / **ニセモノの見分け方** — `{{mail_auth_code}}` の照合手順・差出人固定 (`{{mail_from}}`)・「シェアや暗号文を送り返させる依頼は全て詐欺」 / 開け方 Windows（{{tool_win}} をダブルクリックできない場合の SmartScreen 手順込み）/ 開け方 Mac（Gatekeeper 右クリック→開く手順込み）/ うまくいかない時（合言葉エラー別の対処）/ **メールが来ないままの場合**（金庫の Recovery Sheet・遺言・相続手続きへの導線）/ 困ったら（helper 連絡先欄 `{{helper_note}}`）。age での代替復号は Recovery Sheet の紙にだけ載る旨を明記。
+3. `recovery-sheet-copy.md`: 「この一枚だけでキットを開けられます」警告 / USB と同じ場所に保管しない指示 / `age -d kit.age` の 3 手順 / 印刷日・ローテーション日欄 / 鍵指紋・キット指紋の欄。
+4. `bundle/README-ja.txt`: これは何か / 勝手に開けない約束（開けられない設計であることも一文で）/ 詳しいことは同梱の HTML ガイドか紙のガイドへ。
+5. Payload templates: placeholder rows/examples only; `10-accounts.md` has NO password column (explicit column set: 機関名/種類/口座・契約番号の下 4 桁/連絡先/メモ) plus a pointer row to the password-manager export in `20-credentials/`; every template's header comment states it will be encrypted as-is.
+6. `config-template.yaml`: field-by-field JP+EN comments; placeholder values exactly the `REPLACE_ME…` markers from `config.DefaultVaultConfig()` (issue 07); golden-tested equality with the struct defaults.
+7. Placeholders used across guide copy — normative set: `{{owner_name}} {{seal_date}} {{guide_version}} {{mail_auth_code}} {{mail_from}} {{helper_note}} {{kek_fingerprint}} {{kit_sha256_short}} {{tool_win}} {{tool_mac}}`. (The share integrity CHECK group is deliberately NOT family-facing; mail authentication uses `{{mail_auth_code}}` only — DESIGN §7.) Every `{{...}}` occurring in any content file MUST have a PLACEHOLDERS.md row (tested).
+8. `content_test.go`: embedded set == expected file list; valid UTF-8; non-empty; placeholder inventory completeness; accounts-template password-column negative (grep for パスワード column header).
 
 ## Acceptance Criteria
 
-- [ ] All listed files exist with the mandated sections; placeholder inventory complete and tested.
-- [ ] A native Japanese reader review pass is recorded in the PR (owner review counts).
-- [ ] `go:embed` accessor test lists exactly the expected file set (no strays).
+- [ ] All listed files exist with the mandated sections; inventory + password-column + UTF-8 tests green.
+- [ ] Native-Japanese review by the owner recorded in the PR.
+- [ ] `FS()` accessor test: exact expected file set, content-relative paths.
+- [ ] Anti-phishing copy includes all three A7 elements (mail-auth code, fixed sender, never-send-back) — grep-tested.
 
 ## Validation
 
-Content review by the owner (human) + automated placeholder/UTF-8 tests in CI.
+Content review by the owner (human) + automated tests in CI.
 
 ## Dependencies
 
@@ -49,8 +49,8 @@ Content review by the owner (human) + automated placeholder/UTF-8 tests in CI.
 
 ## Non-goals
 
-HTML layout/QR (16), mail template assembly (21), translations beyond ja/en (v2).
+HTML layout/QR (16), ALL mail wording (21), translations beyond ja/en (v2).
 
 ## Design References
 
-DESIGN §2.2, §2.3, §6.3, §14 (recipient runbook), §10.5 A7; ISSUE_PLAN KU-4.
+DESIGN §2.2, §2.3, §6.3, §7 (mail-auth code), §10.5 A7, §14; ISSUE_PLAN KU-4/KU-5.

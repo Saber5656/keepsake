@@ -4,45 +4,49 @@ Release engineering: goreleaser, checksums, version embedding, install docs
 
 ## Summary
 
-Add reproducible release builds via goreleaser: 4-platform static binaries with embedded version, `checksums.txt`, GitHub Releases publishing workflow on tags, and installation documentation — the artifact contract consumed by `seal` tools/ and `trigger init` vendoring (DESIGN §8.1).
+Add release builds via goreleaser producing exactly the four artifact names of the `internal/dist` contract plus `checksums.txt`, published from a split validate/publish workflow on tags, with a PR-time `goreleaser check`+snapshot job and installation documentation.
 
 ## Context
 
-`internal/dist` (13) downloads `keepsake_<ver>_<os>_<arch>[.exe]` + `checksums.txt` by exact name; this issue makes releases produce exactly that. Long-term recipients run these binaries from USB years later — static, dependency-free builds are a product requirement (§5.4).
+`internal/dist` (13) downloads `keepsake_<version>_<os>_<arch>[.exe]` + `checksums.txt` by exact name; this issue makes releases produce exactly that and keeps the contract tested. Recipients run these binaries from USB years later — static, dependency-free builds are a product requirement (§5.4).
 
 ## Scope
 
-- `.goreleaser.yaml`, `.github/workflows/release.yml`, README install section, `Makefile release-snapshot` target.
+- `.goreleaser.yaml`, `.github/workflows/release.yml`, snapshot job added to CI, README "Install" section, `Makefile release-snapshot`.
 
 ## Detailed Requirements
 
-1. `.goreleaser.yaml`: builds for `darwin/arm64, darwin/amd64, windows/amd64, linux/amd64`; `CGO_ENABLED=0`, `-trimpath`, ldflags setting `internal/version.Version={{.Version}}` and `.Commit={{.ShortCommit}}`; binary name `keepsake`; **archive format: binary** (no tar/zip — dist and recipients need bare binaries) with `name_template: keepsake_{{.Version}}_{{.Os}}_{{.Arch}}`; checksum file `checksums.txt` (sha256, format `<hex>  <filename>`).
-2. `release.yml`: trigger `push: tags: ["v*"]`; `permissions: contents: write` ONLY; pinned actions; runs `make ci` first (full gate before publish), then goreleaser; no other secrets (GITHUB_TOKEN suffices). Draft=false, prerelease auto from semver (`-rc`, `-beta` suffixes).
-3. Artifact name contract asserted by a test in `internal/dist` (13 coordination): a table test pins the exact naming template — breaking it fails CI here AND there.
-4. `make release-snapshot`: local `goreleaser release --snapshot --clean` for testing; document in README dev section.
-5. README "Install" section: download table per OS, sha256 verification instructions (mac/win/linux one-liners), Gatekeeper/SmartScreen notes (KU-5 wording from guide copy), `go install` alternative for developers.
-6. Version discipline: tags `vX.Y.Z`; `keepsake version` output matches tag exactly (release workflow asserts by running the built linux binary).
-7. NO signing/notarization in v1 (explicit v2 note in .goreleaser.yaml comments referencing ISSUE_PLAN §7).
+1. `.goreleaser.yaml`:
+   - builds: `darwin/arm64, darwin/amd64, windows/amd64, linux/amd64`; `CGO_ENABLED=0`, `-trimpath`, ldflags `-s -w -X github.com/Saber5656/keepsake/internal/version.Version={{.Version}} -X github.com/Saber5656/keepsake/internal/version.Commit={{.ShortCommit}}`.
+   - archives: `format: binary`, `name_template: keepsake_{{.Version}}_{{.Os}}_{{.Arch}}` — goreleaser appends `.exe` for windows binary format; the four EXACT uploaded names are asserted (below): `keepsake_<v>_darwin_arm64`, `keepsake_<v>_darwin_amd64`, `keepsake_<v>_windows_amd64.exe`, `keepsake_<v>_linux_amd64`.
+   - checksum: `name_template: checksums.txt`, sha256, covering exactly the four binaries (no extra artifacts; source archives disabled).
+   - Comment noting signing/notarization is v2 (ISSUE_PLAN §7).
+2. `release.yml` (tags `v*`): TWO jobs — `validate` (`permissions: contents: read`) running `make ci`; `publish` (`needs: validate`, `permissions: contents: write`) running goreleaser. Pinned actions; GITHUB_TOKEN only. Prerelease auto-detected from semver suffix.
+3. Contract test (lives beside `internal/dist`, this issue depends on 13): a table test pinning the artifact name template AND a snapshot-integration test: `make release-snapshot` output filenames must be parseable/downloadable by `dist.Ensure` pointed at a file:// or httptest mirror of `dist/`.
+4. CI addition (extends 02's workflow): `release-check` job on PRs — `goreleaser check` + `goreleaser release --snapshot --clean` + assert the four names + checksums.txt exist (keeps config from rotting).
+5. Version discipline: tags `vX.Y.Z[-pre]`; `publish` runs the built linux binary and asserts `version --json` yields `.version == <tag>` and non-empty `.commit`.
+6. README "Install": per-OS download table, sha256 verification one-liners (macOS `shasum -a 256 -c`, Windows `CertUtil`, Linux `sha256sum -c`), Gatekeeper/SmartScreen note pointing to the canonical wording in `internal/content/guide/recipient-guide-copy.md` (KU-5), `go install` for developers.
 
 ## Acceptance Criteria
 
-- [ ] `make release-snapshot` produces 4 binaries + checksums.txt with the exact naming contract (asserted by script).
-- [ ] Tag `v0.1.0-rc.1` on a scratch branch publishes a prerelease with all artifacts; `internal/dist.Ensure` (13) downloads and verifies it successfully (transcript in PR).
-- [ ] Built binaries: `keepsake version` prints the tag; linux binary is static (`ldd` reports not dynamic).
-- [ ] Release workflow permissions minimal; actions pinned (02 grep passes).
+- [ ] `make release-snapshot` produces the four exact names + checksums.txt (script-asserted).
+- [ ] Scratch prerelease tag (e.g. `v0.1.0-rc.1`): both workflow jobs green with the stated permissions; `dist.Ensure` downloads and verifies from the real release (transcript in PR).
+- [ ] Built linux binary: static (`ldd` not-dynamic), `version --json` matches the tag.
+- [ ] `release-check` PR job green; contract table test green.
+- [ ] Actions pinned (02's audit passes on the new workflows).
 
 ## Validation
 
-Scratch prerelease end-to-end with dist download (the real contract test); CI snapshot job keeps the config from rotting.
+Scratch prerelease end-to-end with a real `dist.Ensure` download; the PR snapshot job guards continuously.
 
 ## Dependencies
 
-01, 02.
+01, 02, 13.
 
 ## Non-goals
 
-Homebrew/scoop packaging (v2), cosign/SLSA provenance (v2), auto-update (never — pinning is the security model, ADR-003).
+Homebrew/scoop packaging (v2), cosign/SLSA (v2), auto-update (never — ADR-003), reproducible-build attestation (not claimed in v1).
 
 ## Design References
 
-DESIGN §8.1, §5.4, §10.6; ISSUE_PLAN §7; ADR-003.
+DESIGN §8.1 (artifact contract), §5.4, §10.6; ISSUE_PLAN §7; ADR-003.
